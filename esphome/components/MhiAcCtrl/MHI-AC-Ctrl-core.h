@@ -169,9 +169,9 @@ public:
     // Multiply by 14/51 for power in W
     uint32_t get_power() {
         if(current == 0) {
-            // standby useage of 5W
-            // x* 14/51 = 5
-            return 19;
+            // standby useage of 2.7W
+            // x* 14/51 = 2.7 -> x = 10
+            return 10;
         }
         return current * voltage;
     }
@@ -195,7 +195,7 @@ public:
         uint64_t new_total;
         uint64_t current_total;
         do {
-            uint64_t current_total = total_energy.load();
+            current_total = total_energy.load();
             new_total = current_total + additional_energy;
             exchanged = total_energy.compare_exchange_weak(current_total, new_total);
         } while(!exchanged);

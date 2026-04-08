@@ -1,4 +1,4 @@
-// MHI-AC-Ctrol-core
+// MHI-AC-Ctrl-core
 // implements the core functions (read & write SPI)
 
 #include "MHI-AC-Ctrl-core.h"
@@ -29,7 +29,7 @@ using namespace mhi_ac::internal;
 #define vTaskDelayMs(ms)            vTaskDelay((ms)/portTICK_PERIOD_MS)
 
 #define ESP_INTR_FLAG_DEFAULT       0                                           // default to allocating a non-shared interrupt of level 1, 2 or 3.
-#define STACK_SIZE 2560
+#define STACK_SIZE 4096
 
 static StaticTask_t xTaskBuffer;
 static StackType_t xStack[ STACK_SIZE ];
@@ -190,8 +190,8 @@ void SpiState::fan_set(ACFan fan) {
 }
 
 ACFan SpiState::fan_get() const {
-  uint8_t fan_value = this->mosi_frame_snapshot_[DB1] & FAN_MASK |
-    (this->mosi_frame_snapshot_[DB6] & FAN_DB6_MASK) >> 4;
+  uint8_t fan_value = (this->mosi_frame_snapshot_[DB1] & FAN_MASK) |
+    ((this->mosi_frame_snapshot_[DB6] & FAN_DB6_MASK) >> 4);
   switch(fan_value) {
     case (uint8_t) ACFan::speed_1:
     case (uint8_t) ACFan::speed_2:
@@ -284,15 +284,16 @@ void SpiState::vanes_updown_set(ACVanesUD new_state) {
       this->miso_frame_[DB0] |= 0x40; // Enable swing
   } else {
       this->miso_frame_[DB0] &= ~0x40;
-      this->miso_frame_[DB1] |= 0x80; // Pos set
-      this->miso_frame_[DB1] |= (static_cast<uint8_t>(new_state)) << 4;
+      this->miso_frame_[DB1] |= 0x80;  // Pos set
+      this->miso_frame_[DB1] &= ~0x30; // Clear previous flags
+      this->miso_frame_[DB1] |= (static_cast<uint8_t>(new_state) & 0x03) << 4;
   }
   xSemaphoreGive(miso_semaphore_handle_);
 }
 
 bool SpiState::vanes_leftright_changed() const {
   return (this->mosi_frame_snapshot_[DB16] & 0x07) != (this->mosi_frame_snapshot_prev_[DB16] & 0x07) ||
-    (this->mosi_frame_snapshot_[DB17] & 0x01) != (this->mosi_frame_snapshot_[DB17] & 0x01);
+    (this->mosi_frame_snapshot_[DB17] & 0x01) != (this->mosi_frame_snapshot_prev_[DB17] & 0x01);
 }
 
 ACVanesLR SpiState::vanes_leftright_get() const {
@@ -344,7 +345,7 @@ static int validate_frame_short(std::span<uint8_t, MHI_FRAME_LEN_SHORT> mosi_fra
                 mosi_frame[0], mosi_frame[1], mosi_frame[2]);
 
     return -1;
-  } else if ( (mosi_frame[CBH] != (rx_checksum>>8 & 0xff)) | (mosi_frame[CBL] != (rx_checksum & 0xff)) ) {
+  } else if ( (mosi_frame[CBH] != (rx_checksum>>8 & 0xff)) || (mosi_frame[CBL] != (rx_checksum & 0xff)) ) {
     ESP_LOGW(TAG, "wrong short MOSI checksum. calculated 0x%04x. MOSI[18]:0x%02x MOSI[19]:0x%02x",
                 rx_checksum, mosi_frame[CBH], mosi_frame[CBL]);
 
@@ -363,32 +364,38 @@ static int validate_frame_long(std::span<uint8_t, MHI_FRAME_LEN_LONG> mosi_frame
 }
 
 static int validate_frame(std::span<uint8_t, MHI_FRAME_LEN_LONG> mosi_frame, uint8_t frame_len) {
-  int err = 0;;
+  int err = 0;
   uint16_t rx_checksum = 0;
-  // Frame len has been validated before to only be either MHI_FRAME_LEN_LONG or MHI_FRAME_LEN_SHORT
-  for (uint8_t i = 0; i < frame_len; i++) {
-    switch(i) {
+
+  // Berechne Checksum nur über die tatsächlich empfangenen Short-Frame-Bytes
+  for (uint8_t i = 0; i < MHI_FRAME_LEN_SHORT; i++) {
+    switch (i) {
       case CBH:
-        // validate checksum short
-        err = validate_frame_short(std::span{mosi_frame}.first<MHI_FRAME_LEN_SHORT>(), rx_checksum);
-        if(err) {
-          return err;
-        }
+        err = validate_frame_short(
+            std::span{mosi_frame}.first<MHI_FRAME_LEN_SHORT>(),
+            rx_checksum);
+        if (err) return err;
         rx_checksum += mosi_frame[CBH];
         rx_checksum += mosi_frame[CBL];
-        // skip over CBL
-        i++;
-        break;
-      case CBL2:
-        err = validate_frame_long(mosi_frame, rx_checksum);
-        if(err) {
-          return err;
-        }
+        i++; // CBL überspringen
         break;
       default:
         rx_checksum += mosi_frame[i];
     }
   }
+
+  // Long-Frame-Validierung nur wenn tatsächlich ein Long-Frame empfangen wurde
+  if (frame_len == MHI_FRAME_LEN_LONG) {
+    for (uint8_t i = MHI_FRAME_LEN_SHORT; i < MHI_FRAME_LEN_LONG; i++) {
+      if (i == CBL2) {
+        err = validate_frame_long(mosi_frame, static_cast<uint8_t>(rx_checksum));
+        if (err) return err;
+      } else {
+        rx_checksum += mosi_frame[i];
+      }
+    }
+  }
+
   return err;
 }
 
