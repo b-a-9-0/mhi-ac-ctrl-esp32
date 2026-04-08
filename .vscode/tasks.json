@@ -1,0 +1,55 @@
+{
+    "version": "2.0.0",
+    "tasks": [
+        {
+            "label": "esphome config",
+            "type": "shell",
+            "command": "esphome/.penv/Scripts/esphome config esphome/custom.yaml",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "esphome compile",
+            "type": "shell",
+            "command": "esphome/.penv/Scripts/esphome compile esphome/custom.yaml",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": true
+            }
+        },
+        {
+            "label": "esphome upload",
+            "type": "shell",
+            "command": "esphome/.penv/Scripts/esphome upload esphome/custom.yaml",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "esphome run",
+            "type": "shell",
+            "command": "esphome/.penv/Scripts/esphome run esphome/custom.yaml",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        },
+        {
+            "label": "esphome clean",
+            "type": "shell",
+            "command": "esphome/.penv/Scripts/esphome clean esphome/custom.yaml",
+            "problemMatcher": [],
+            "group": {
+                "kind": "build",
+                "isDefault": false
+            }
+        }
+    ]
+}

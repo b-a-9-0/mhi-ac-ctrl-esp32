@@ -1,0 +1,360 @@
+substitutions:
+  project_name: "mhi-ac-control"
+  mhi_instance_name: "ac_control"
+  # Unique device ID in HA
+  device_id: "mhi_ac_control"
+  # Unique device name in HA (sensor names will be prefixed by this name)
+  device_name: "MHI AC"
+
+esphome:
+  name: ${project_name}
+  friendly_name: ${device_name}
+  min_version: 2026.3.1
+  # name_add_mac_suffix: true
+
+external_components:
+  - source: components
+# Or, directly refer to the Git repository
+#  - source: github://hberntsen/mhi-ac-ctrl-esp32-c3@master
+
+esp32:
+  board: lolin_c3_mini
+  # Run CPU at slower speed to save power
+  # cpu_frequency: 80MHz
+  framework:
+    type: esp-idf
+
+api:
+  reboot_timeout: 15min
+
+ota:
+  - platform: esphome
+
+web_server:
+  port: 80
+  version: 3
+
+wifi:
+  power_save_mode: none
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: ${project_name}-setup
+    password: ""
+    ap_timeout: 24h
+  reboot_timeout: 15min
+  enable_btm: true  # 802.11v BSS Transition Management
+  enable_rrm: true  # 802.11k Radio Resource Management
+
+captive_portal:
+
+# Optionally enable logging
+logger:
+  level: DEBUG
+  hardware_uart: USB_SERIAL_JTAG
+  baud_rate: 19200
+
+text_sensor:
+  - platform: version
+    name: "ESPHome Version"
+    icon: mdi:information-outline
+    hide_timestamp: true
+    entity_category: diagnostic
+
+button:
+  - platform: restart
+    name: "Neu starten (ESPHome)"
+    icon: mdi:restart
+  - platform: factory_reset
+    name: Werkseinstellungen (ESPHome)
+    icon: mdi:restore-alert
+
+one_wire:
+  - platform: gpio
+    pin: GPIO10
+    id: one_wire_bus
+
+MhiAcCtrl:
+  id: ${mhi_instance_name}
+  # Optional config
+  # The default values are:
+
+  # Set to false on older AC units that don't support the longer frames
+  use_long_frame: true
+  mosi_pin: GPIO6
+  miso_pin: GPIO5
+  sclk_pin: GPIO4
+  # external_temperature_sensor: room_temperature_sensor
+
+climate:
+  - platform: MhiAcCtrl
+    mhi_ac_ctrl_id: ${mhi_instance_name}
+    id: ${device_id}
+    name: "${device_name}"
+    # For AC units that support .5 degree steps of the target temperature.
+    # Not sure? Try it and check whether the set_temperature sensor responds in 0.5 steps as well.
+    visual:
+      temperature_step:
+        target_temperature: 0.5
+        current_temperature: 0.1
+      min_temperature: 16
+      max_temperature: 28
+
+select:
+  - platform: MhiAcCtrl
+    mhi_ac_ctrl_id: ${mhi_instance_name}
+    vanes_ud:
+      name: Lamellen oben ⁄ unten
+      icon: mdi:arrow-up-down
+      id: ${device_id}_vanes_ud
+    vanes_lr:
+      name: Lamellen links ⁄ rechts
+      icon: mdi:arrow-left-right
+      id: ${device_id}_vanes_lr
+
+sensor:
+  - platform: MhiAcCtrl
+    mhi_ac_ctrl_id: ${mhi_instance_name}
+    # Counts SPI frames that did not look right. Usually a few at boot or when
+    # switching active mode
+    frame_errors:
+      name: Frame Errors
+      icon: mdi:alert-circle-outline
+      entity_category: diagnostic
+
+    # Special sensor to filter out bursts of (small) temperature changes. When
+    # this sensor is present, the current temperature in the climate component
+    # will use the filtered value from this sensor.
+    #
+    # Use case: filtering out temperature jitter. See
+    # https://github.com/hberntsen/mhi-ac-ctrl-esp32-c3/issues/5
+    climate_current_temperature:
+      # Only id, no name so it won't be sent to home assistant as separate sensor
+      id: climate_current_temperature
+      filters:
+        # Check for temperature changes only every 10 seconds
+        - heartbeat: 10s
+        # Home assistant does not show decimals
+        - round: 0
+        # The climate component will only send updates if the value is different
+
+    # Operation data based sensors
+    #
+    # These sensors provide some internal stats, not all interesting. Similarly
+    # to the rest of the sensors: only keep the ones you'll actually look at.
+
+    # Data is requested sensor by sensor (when present) from the AC, which
+    # should always answer, but might not. The timeout sensor counts how many
+    # requests were not answered. It is normal to have up to thousands per day,
+    # therefore the sensor is not that useful to include in your yaml.
+    operation_data_timeouts:
+      name: Betriebsdaten-Timeouts
+      icon: mdi:timer-alert-outline
+      entity_category: diagnostic
+      filters:
+        - throttle: 5min
+
+    # When operation data is more than a minute old, we set it to unknown,
+    # which makes a timeout in the operation data visible. This counts how
+    # often this happens. Usually, when a normal operation data timeout occurs,
+    # we re-request it and that should work, preventing a visible timeout.
+    operation_data_visible_timeouts:
+      name: Betriebsdaten-Timeouts >5min
+      icon: mdi:timer-remove-outline
+      entity_category: diagnostic
+
+    # In steps of 14/51A
+    current:
+      name: Stromstärke
+      icon: mdi:current-ac
+      entity_category: diagnostic
+
+    # Using the current from the operation data, multiplied by 230V, or the
+    # value set using from, i.e. a home assistant voltage sensor. See later in
+    # this file. Note that this is technically not watts but VA. Though in
+    # practice, the AC has a power factor of 1 when active. Except for the
+    # lowest power around 280W, then the power factor is around 0.78 on my
+    # multi-split. This is quite rough anyway due to the step size of the
+    # current sensor.
+    power:
+      name: Leistung
+      icon: mdi:lightning-bolt
+      entity_category: diagnostic
+    # Integrates the power sensor above into energy usage, as an alternative to
+    # the internal sensor. Assumes 5W idle usage. The heavier the AC is used,
+    # the less accurate it seems compared to an external power meter (like, the
+    # actual usage can be a factor of 1.6 times higher). It can also be on-par
+    # with less heavy load.
+    # Not sure yet which is more accurate. See the discussion here:
+    # https://gathering.tweakers.net/forum/list_message/81683330#81683330
+    integrated_total_energy:
+      name: Gesamtenergie (berechnet)
+      icon: mdi:transmission-tower
+      entity_category: diagnostic
+      filters:
+        - throttle: 60s
+
+    # The energy usage provided by the AC, in steps of 250Wh. It will not reset
+    # regularly, but not exactly midnight. So you can better create a Utility
+    # Meter helper in Home Assistant that does. Use this sensor as input and
+    # choose a reset cycle. Net consumption, delta values switches off,
+    # periodically resetting on.
+    energy_used:
+      name: Verbrauchte Energie
+      icon: mdi:meter-electric-outline
+      entity_category: diagnostic
+
+    # The internal target temperature for the AC. This can be different from
+    # the target temperature in the climate sensor:
+    # * With eco mode
+    # * + 2 degrees celcius when heating, unless the built in countermeasure
+    #   for excessive temperature rise is used.
+    set_temperature:
+      name: Solltemperatur (intern)
+      icon: mdi:thermometer-chevron-up
+    return_air_temperature:
+      name: Ansauglufttemperatur (innen)
+      icon: mdi:thermometer-lines
+    # More granular fan speed than we can see in the climate directly
+    indoor_fan_speed:
+      name: Innengebläse Drehzahl
+      icon: mdi:fan
+
+    # 100 hour granularity
+    indoor_total_run_hours:
+      name: Innengerät Betriebsstunden gesamt
+      icon: mdi:clock-outline
+      entity_category: diagnostic
+    compressor_total_run_hours:
+      name: Kompressor Betriebsstunden gesamt
+      icon: mdi:clock-outline
+      entity_category: diagnostic
+
+    outdoor_air_temperature:
+      name: Außenlufttemperatur
+      icon: mdi:thermometer
+    discharge_pipe_temperature:
+      name: Druckrohrtemperatur
+      icon: mdi:pipe
+      entity_category: diagnostic
+
+    compressor_protection_state_number:
+      name: Kompressor Schutzstatus
+      icon: mdi:shield-alert-outline
+      entity_category: diagnostic
+    outdoor_fan_speed:
+      name: Außengebläse Drehzahl
+      icon: mdi:fan
+      entity_category: diagnostic
+    outdoor_expansion_valve_pulse_rate:
+      name: Außen-Expansionsventil Pulsrate
+      icon: mdi:valve
+      entity_category: diagnostic
+
+    # Calculation marked as 'to be confirmed' in mhi-ac-ctrl
+    compressor_frequency:
+      name: Kompressorfrequenz
+      icon: mdi:sine-wave
+      entity_category: diagnostic
+    # See https://github.com/ginkage/MHI-AC-Ctrl-ESPHome/issues/145#issuecomment-3078841631
+    indoor_capillary_temperature:
+      name: Innen-Kapillartemperatur
+      icon: mdi:thermometer-water
+      entity_category: diagnostic
+
+    # These two are marked as only a rough approximation in mhi-ac-ctrl
+    indoor_u_bend_temperature:
+      name: Innen U-Bogen Temperatur
+      icon: mdi:thermometer-water
+      entity_category: diagnostic
+    indoor_suction_header_temperature:
+      name: Innen Saugkopf Temperatur
+      icon: mdi:thermometer-water
+      entity_category: diagnostic
+
+    # Formula for calculation not known for the following sensors:
+    outdoor_heat_exchanger_temperature_1:
+      name: Außen Wärmetauscher Temperatur 1
+      icon: mdi:heat-wave
+      entity_category: diagnostic
+    compressor_discharge_pipe_super_heat_temperature:
+      name: Druckrohr Überhitzungstemperatur
+      icon: mdi:thermometer-alert
+      entity_category: diagnostic
+  
+  # external temperature sensor (from homeassistant)
+  # - platform: homeassistant
+  #   id: room_temperature_sensor
+  #   # entity_id: sensor.temperature_sensor_your_room_temperature
+  #   entity_id: input_number.temp_test
+
+  # external temperature sensor (builtin)
+  - platform: dallas_temp
+    name: Raumtemperatur
+    icon: mdi:home-thermometer-outline
+    id: room_temperature_sensor
+    update_interval: 30s
+    resolution: 12
+    one_wire_id: one_wire_bus
+    # Adresse mit dem ESPHome-Log beim ersten Start ermitteln und hier eintragen:
+    # address: 0xXXXXXXXXXXXXXXXX
+
+  - platform: uptime
+    name: "Betriebszeit"
+    icon: mdi:clock-outline
+    entity_category: diagnostic
+
+  - platform: wifi_signal
+    name: "WLAN Signalstärke"
+    icon: mdi:wifi
+    update_interval: 60s
+    entity_category: diagnostic
+
+binary_sensor:
+  - platform: MhiAcCtrl
+    mhi_ac_ctrl_id: ${mhi_instance_name}
+    # Defrosting sensor via operation data
+    defrosting:
+      name: Abtauvorgang
+      icon: mdi:snowflake-melt
+
+#  # For setting the current voltage, so we can calculate the used power
+#  - platform: homeassistant
+#    name: "Spannung"
+#    entity_id: sensor.voltage_l3
+#    filters:
+#      - filter_out: nan
+#    on_value:
+#      then:
+#        - lambda: 'mhi_ac::energy.set_voltage(x);'
+
+switch:
+  - platform: MhiAcCtrl
+    mhi_ac_ctrl_id: ${mhi_instance_name}
+    # Note that you'll need to enable the active mode switch before sending
+    # commands to the AC will work. Without that enabled, the ESP will
+    # passively listen to data and the AC won't know it is there. This has been
+    # done as a safety feature: when the AC unit does not see communications
+    # from the ESP after a while, the AC internally decides to turn off. This
+    # works together with the `api` component of ESPHome: the ESP will
+    # automatically reboot after 15 minutes when it does not have a Home
+    # Assistant connection. Since active mode is off by default, the AC will
+    # turn off when your Home Assistant connection dies. In addition, with
+    # active mode turned off you'll be able to use the timers from the IR
+    # remote again.
+    #
+    # An automation blueprint to enable active mode automatically from home
+    # assistant is included in the homeassistant directory. Though you can also
+    # use the built in ESPHome features to enable this switch automatically.
+    # See https://github.com/hberntsen/mhi-ac-ctrl-esp32-c3/issues/17#issuecomment-2744462292
+    active_mode:
+      name: Aktivmodus
+      icon: mdi:power
+      id: ${device_id}_active_mode
+      entity_category: config
+
+status_led:
+  pin:
+    # blue led, off when all good
+    number: GPIO8
+    inverted: true
+    ignore_strapping_warning: true
